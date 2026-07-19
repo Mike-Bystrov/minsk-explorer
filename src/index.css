@@ -1,0 +1,9 @@
+body {
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+/* Делаем посещенные маркеры золотыми/зелеными с помощью фильтра */
+.visited-marker {
+  filter: hue-rotate(140deg) brightness(1.2) drop-shadow(0 0 5px gold);
+}
