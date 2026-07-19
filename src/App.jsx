@@ -5,10 +5,11 @@ import "leaflet/dist/leaflet.css";
 import L from "leaflet";
 import { supabase } from "./supabaseClient";
 
-// 1. Используем только CDN ссылки для иконок (100% работа на Vercel)
-const ICON_URL = "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png";
+// Иконки (CDN)
+const ICON_URL =
+  "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon.png";
 const SHADOW_URL =
-  "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png";
+  "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png";
 
 const DefaultIcon = L.icon({
   iconUrl: ICON_URL,
@@ -16,27 +17,14 @@ const DefaultIcon = L.icon({
   iconSize: [25, 41],
   iconAnchor: [12, 41],
 });
-L.Marker.prototype.options.icon = DefaultIcon;
-
-const userIcon = L.divIcon({
-  className: "user-location-icon",
-  html: '<div style="background-color: #3b82f6; width: 18px; height: 18px; border-radius: 50%; border: 3px solid white; box-shadow: 0 0 10px rgba(0,0,0,0.5);"></div>',
-  iconSize: [20, 20],
-});
 
 const MINSK_CENTER = [53.9006, 27.559];
-const MINSK_BOUNDS = [
-  [53.82, 27.38],
-  [53.98, 27.75],
-];
-
-const dataCache = {};
 
 function RecenterAutomatically({ userPos }) {
   const map = useMap();
   useEffect(() => {
     if (userPos) map.setView(userPos, 15);
-  }, [userPos, map]);
+  }, [userPos]);
   return null;
 }
 
@@ -47,56 +35,50 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [category, setCategory] = useState("cafe");
   const [userPos, setUserPos] = useState(null);
+  const [status, setStatus] = useState("Инициализация...");
 
-  // Авторизация
+  // Тестовая точка, которая будет ВСЕГДА (Октябрьская площадь)
+  const testPlace = {
+    id: 999999,
+    lat: 53.9035,
+    lon: 27.5615,
+    tags: { name: "ТЕСТОВАЯ ТОЧКА (Октябрьская)" },
+  };
+
   useEffect(() => {
     supabase.auth
       .getSession()
       .then(({ data: { session } }) => setUser(session?.user ?? null));
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) =>
-      setUser(session?.user ?? null),
-    );
-    return () => subscription.unsubscribe();
-  }, []);
 
-  // Геолокация
-  useEffect(() => {
-    if (!navigator.geolocation) return;
-    const watchId = navigator.geolocation.watchPosition(
-      (pos) => setUserPos([pos.coords.latitude, pos.coords.longitude]),
-      (err) => console.log("Геолокация недоступна, используем ручной режим"),
-      { enableHighAccuracy: true, timeout: 10000 },
-    );
-    return () => navigator.geolocation.clearWatch(watchId);
-  }, []);
-
-  // Загрузка данных (с новым зеркалом и исправленным CORS)
-  const fetchPlaces = async (type) => {
-    if (dataCache[type]) {
-      setPlaces(dataCache[type]);
-      return;
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => setUserPos([pos.coords.latitude, pos.coords.longitude]),
+        (err) => setStatus("GPS ошибка: " + err.message),
+      );
     }
+  }, []);
+
+  const fetchPlaces = async (type) => {
     setLoading(true);
+    setStatus("Загрузка " + type + "...");
 
-    // Используем зеркало lz4 и добавляем таймаут в сам запрос
-    const query = `[out:json][timeout:25];
-      node["amenity"="${type}"](53.82, 27.38, 53.98, 27.75);
-      out;`;
-
-    // Попробуем альтернативное зеркало, если основное дает 406
-    const url = `https://lz4.overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`;
+    const query = `[out:json][timeout:25];node["amenity"="${type}"](53.82,27.38,53.98,27.75);out;`;
+    const url = `https://overpass.kumi.systems/api/interpreter?data=${encodeURIComponent(query)}`;
 
     try {
-      const response = await fetch(url);
-      if (!response.ok) throw new Error("Сетевая ошибка");
+      const response = await fetch(url, {
+        headers: {
+          Accept: "application/json",
+          // Не добавляем лишних заголовков, которые могут вызвать CORS
+        },
+      });
+      if (!response.ok) throw new Error("Сервер ответил: " + response.status);
       const data = await response.json();
-      const elements = data.elements || [];
-      dataCache[type] = elements;
-      setPlaces(elements);
+      setPlaces(data.elements || []);
+      setStatus("ОК: найдено " + (data.elements?.length || 0));
     } catch (error) {
-      console.error("Ошибка API:", error);
+      console.error(error);
+      setStatus("Ошибка API: " + error.message);
     } finally {
       setLoading(false);
     }
@@ -106,21 +88,20 @@ function App() {
     fetchPlaces(category);
   }, [category]);
 
-  // Посещения
   useEffect(() => {
     const fetchVisited = async () => {
       if (!user) return;
-      const { data } = await supabase
-        .from("visited_places")
-        .select("place_id")
-        .eq("user_id", user.id);
+      const { data } = await supabase.from("visited_places").select("place_id");
       if (data) setVisitedIds(data.map((i) => i.place_id));
     };
     fetchVisited();
   }, [user]);
 
   const toggleVisit = async (placeId) => {
-    if (!user) return alert("Войдите!");
+    if (!user) {
+      alert("Сначала нажмите Войти");
+      return;
+    }
     if (visitedIds.includes(placeId)) {
       await supabase
         .from("visited_places")
@@ -136,68 +117,55 @@ function App() {
     }
   };
 
-  const getDistance = (pos1, pos2) => {
-    if (!pos1 || !pos2) return null;
-    return L.latLng(pos1).distanceTo(L.latLng(pos2));
-  };
-
-  const getIcon = (placeId) => {
-    const isVisited = visitedIds.includes(placeId);
-    return L.icon({
-      iconUrl: ICON_URL,
-      shadowUrl: SHADOW_URL,
-      iconSize: [25, 41],
-      iconAnchor: [12, 41],
-      className: isVisited ? "visited-marker" : "",
-    });
-  };
-
   return (
     <div style={{ height: "100vh", width: "100vw", position: "relative" }}>
+      {/* ПАНЕЛЬ СТАТУСА */}
+      <div
+        style={{
+          position: "absolute",
+          bottom: 20,
+          left: 10,
+          zIndex: 2000,
+          background: "rgba(0,0,0,0.7)",
+          color: "white",
+          padding: "8px",
+          fontSize: "12px",
+          borderRadius: "5px",
+        }}
+      >
+        Статус: {status}
+      </div>
+
       <div style={panelStyle}>
         <div
           style={{
-            marginBottom: "10px",
             display: "flex",
             justifyContent: "space-between",
-            alignItems: "center",
+            gap: "10px",
           }}
         >
-          <span style={{ fontWeight: "bold" }}>Minsk Explorer</span>
+          <b>Minsk Explorer</b>
           {!user ? (
-            <button
-              onClick={() => supabase.auth.signInAnonymously()}
-              style={authBtnStyle}
-            >
+            <button onClick={() => supabase.auth.signInAnonymously()}>
               Войти
             </button>
           ) : (
-            <button
-              onClick={() => supabase.auth.signOut()}
-              style={authBtnStyle}
-            >
-              Выйти
-            </button>
+            <button onClick={() => supabase.auth.signOut()}>Выйти</button>
           )}
         </div>
-
         {user && (
-          <>
-            <div style={{ display: "flex", gap: "5px", marginBottom: "10px" }}>
-              {["cafe", "restaurant", "cinema"].map((cat) => (
-                <button
-                  key={cat}
-                  onClick={() => setCategory(cat)}
-                  style={btnStyle(category === cat)}
-                >
-                  {cat === "cafe" ? "☕" : cat === "restaurant" ? "🍲" : "🎬"}
-                </button>
-              ))}
-            </div>
-            <div style={{ fontSize: "12px", color: "#666" }}>
-              {loading ? "Загрузка..." : `Посещено: ${visitedIds.length}`}
-            </div>
-          </>
+          <div
+            style={{
+              marginTop: "10px",
+              display: "flex",
+              gap: "10px",
+              alignItems: "center",
+            }}
+          >
+            <button onClick={() => setCategory("cafe")}>☕ Кафе</button>
+            <button onClick={() => setCategory("restaurant")}>🍲 Еда</button>
+            <span style={{ fontSize: "12px" }}>🏆 {visitedIds.length}</span>
+          </div>
         )}
       </div>
 
@@ -207,47 +175,58 @@ function App() {
         style={{ height: "100%", width: "100%" }}
       >
         <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
-
         <RecenterAutomatically userPos={userPos} />
 
+        {/* МАРКЕР ИГРОКА */}
         {userPos && (
-          <Marker position={userPos} icon={userIcon}>
+          <Marker
+            position={userPos}
+            icon={L.divIcon({
+              className: "",
+              html: '<div style="background: #3b82f6; width: 15px; height: 15px; border-radius: 50%; border: 2px solid white;"></div>',
+            })}
+          >
             <Popup>Ты здесь!</Popup>
           </Marker>
         )}
 
-        <MarkerClusterGroup chunkedLoading>
-          {places.map((place) => {
-            const dist = getDistance(userPos, [place.lat, place.lon]);
-            return (
-              <Marker
-                key={place.id}
-                position={[place.lat, place.lon]}
-                icon={getIcon(place.id)}
-              >
-                <Popup>
-                  <strong>{place.tags.name || "Без названия"}</strong>
-                  <br />
-                  <p>
-                    Дистанция:{" "}
-                    {dist
-                      ? dist < 1000
-                        ? `${Math.round(dist)}м`
-                        : `${(dist / 1000).toFixed(1)}км`
-                      : "Определяем GPS..."}
-                  </p>
-                  <button
-                    onClick={() => toggleVisit(place.id)}
-                    style={{ marginTop: "5px", cursor: "pointer" }}
-                  >
-                    {visitedIds.includes(place.id)
-                      ? "❌ Удалить"
-                      : "✅ Я ТУТ БЫЛ"}
-                  </button>
-                </Popup>
-              </Marker>
-            );
-          })}
+        {/* ТЕСТОВАЯ ТОЧКА (ВСЕГДА ЕСТЬ) */}
+        <Marker position={[testPlace.lat, testPlace.lon]} icon={DefaultIcon}>
+          <Popup>
+            {testPlace.tags.name}
+            <br />
+            <button onClick={() => toggleVisit(testPlace.id)}>
+              {visitedIds.includes(testPlace.id) ? "✅ Посещено" : "Отметить"}
+            </button>
+          </Popup>
+        </Marker>
+
+        {/* ОБЪЕКТЫ ИЗ API */}
+        <MarkerClusterGroup>
+          {places.map((place) => (
+            <Marker
+              key={place.id}
+              position={[place.lat, place.lon]}
+              icon={L.icon({
+                iconUrl: ICON_URL,
+                shadowUrl: SHADOW_URL,
+                iconSize: [25, 41],
+                className: visitedIds.includes(place.id)
+                  ? "visited-marker"
+                  : "",
+              })}
+            >
+              <Popup>
+                {place.tags.name || "Без названия"}
+                <br />
+                <button onClick={() => toggleVisit(place.id)}>
+                  {visitedIds.includes(place.id)
+                    ? "❌ Удалить"
+                    : "✅ Я ТУТ БЫЛ"}
+                </button>
+              </Popup>
+            </Marker>
+          ))}
         </MarkerClusterGroup>
       </MapContainer>
     </div>
@@ -256,29 +235,13 @@ function App() {
 
 const panelStyle = {
   position: "absolute",
-  top: 15,
-  left: 60,
+  top: 10,
+  left: 10,
   zIndex: 1000,
-  background: "rgba(255,255,255,0.9)",
-  padding: "15px",
-  borderRadius: "12px",
-  boxShadow: "0 4px 15px rgba(0,0,0,0.2)",
-  minWidth: "200px",
-};
-const btnStyle = (active) => ({
-  padding: "8px 12px",
-  cursor: "pointer",
-  border: "none",
-  borderRadius: "6px",
-  background: active ? "#007bff" : "#eee",
-  color: active ? "white" : "black",
-});
-const authBtnStyle = {
-  padding: "4px 8px",
-  fontSize: "11px",
-  cursor: "pointer",
-  borderRadius: "4px",
-  border: "1px solid #ccc",
+  background: "white",
+  padding: "12px",
+  borderRadius: "10px",
+  boxShadow: "0 2px 10px rgba(0,0,0,0.3)",
 };
 
 export default App;
